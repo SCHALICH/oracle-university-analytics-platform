@@ -1,0 +1,7 @@
+fastapi==0.116.1
+minio==7.2.20
+oracledb>=2.0,<4
+pika==1.4.2
+PyJWT[crypto]==2.13.0
+redis==6.4.0
+uvicorn[standard]==0.35.0

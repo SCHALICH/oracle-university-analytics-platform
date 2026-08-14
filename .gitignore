@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.env
+.env.*
+*.tar
+*.tmp
+
+main.py.before-*
+main.py.*.backup
+
+.vscode/
+.idea/
+.DS_Store
