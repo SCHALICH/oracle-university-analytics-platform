@@ -1,0 +1,135 @@
+name: Deploy API to K3s
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: university-production-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - university-devops
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          command -v podman
+          command -v kubectl
+          test -x /usr/local/bin/k3s
+          test -f "$HOME/.kube/config"
+
+          export KUBECONFIG="$HOME/.kube/config"
+
+          kubectl get namespace university-platform
+          kubectl get deployment oracle-university-api-v2 \
+            -n university-platform
+
+      - name: Build image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SHORT_SHA="${GITHUB_SHA::12}"
+          IMAGE="localhost/oracle-university-api:git-${SHORT_SHA}"
+
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          echo "Building $IMAGE"
+
+          podman build \
+            -t "$IMAGE" \
+            -f Containerfile .
+
+      - name: Import image into K3s
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAR="/tmp/university-api-${GITHUB_SHA::12}.tar"
+
+          rm -f "$TAR"
+
+          podman save "$IMAGE" -o "$TAR"
+
+          sudo /usr/local/bin/k3s ctr images import "$TAR"
+
+          rm -f "$TAR"
+
+      - name: Backup current deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export KUBECONFIG="$HOME/.kube/config"
+
+          BACKUP="$HOME/university-backups/github-deploy-${GITHUB_RUN_ID}"
+          mkdir -p "$BACKUP"
+
+          kubectl get deployment oracle-university-api-v2 \
+            -n university-platform -o yaml \
+            > "$BACKUP/oracle-university-api-v2.yaml"
+
+          echo "BACKUP=$BACKUP" >> "$GITHUB_ENV"
+
+      - name: Deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export KUBECONFIG="$HOME/.kube/config"
+
+          kubectl set image \
+            deployment/oracle-university-api-v2 \
+            -n university-platform \
+            oracle-university-api="$IMAGE"
+
+          kubectl rollout status \
+            deployment/oracle-university-api-v2 \
+            -n university-platform \
+            --timeout=180s
+
+      - name: Health check
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export KUBECONFIG="$HOME/.kube/config"
+
+          POD=$(kubectl get pod \
+            -n university-platform \
+            -l app=oracle-university-api-v2 \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}')
+
+          kubectl exec \
+            -n university-platform \
+            "$POD" -- \
+            python -c \
+            'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=10).read().decode())'
+
+      - name: Rollback on failure
+        if: failure()
+        shell: bash
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+
+          echo "Deployment failed. Rolling back..."
+
+          kubectl rollout undo \
+            deployment/oracle-university-api-v2 \
+            -n university-platform || true
+
+          kubectl rollout status \
+            deployment/oracle-university-api-v2 \
+            -n university-platform \
+            --timeout=180s || true
