@@ -141,7 +141,8 @@ jobs:
             -l app=oracle-university-api-v2 \
             --field-selector=status.phase=Running \
             --sort-by=.metadata.creationTimestamp \
-            -o jsonpath='{range .items[*]}{.metadata.name}{"\\n"}{end}' | tail -n 1)
+            -o custom-columns=NAME:.metadata.name \
+            --no-headers | tail -n 1)
 
           if [ -z "$POD" ]; then
             echo "Çalışan API pod'u bulunamadı."
