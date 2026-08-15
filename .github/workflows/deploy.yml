@@ -136,11 +136,25 @@ jobs:
 
           export KUBECONFIG="$HOME/.kube/config"
 
-          POD=$(kubectl get pod \
+          POD=$(kubectl get pods \
             -n university-platform \
             -l app=oracle-university-api-v2 \
             --field-selector=status.phase=Running \
-            -o jsonpath='{.items[0].metadata.name}')
+            --sort-by=.metadata.creationTimestamp \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\\n"}{end}' | tail -n 1)
+
+          if [ -z "$POD" ]; then
+            echo "Çalışan API pod'u bulunamadı."
+            exit 1
+          fi
+
+          echo "Health check pod'u: $POD"
+
+          kubectl wait \
+            -n university-platform \
+            --for=condition=Ready \
+            "pod/$POD" \
+            --timeout=60s
 
           kubectl exec \
             -n university-platform \
