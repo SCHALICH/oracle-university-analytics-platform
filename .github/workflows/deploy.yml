@@ -91,7 +91,7 @@ jobs:
           kubectl set image \
             deployment/oracle-university-api-v2 \
             -n university-platform \
-            oracle-university-api="$IMAGE"
+            api="$IMAGE"
 
           kubectl rollout status \
             deployment/oracle-university-api-v2 \
