@@ -2,6 +2,15 @@ name: Deploy API to K3s
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Üretim sürüm etiketi. Örnek: v6.1"
+        required: true
+        default: "v6.1"
+        type: string
+
+permissions:
+  contents: write
 
 concurrency:
   group: university-production-api
@@ -19,9 +28,29 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Preflight
+      - name: Sürüm etiketini kontrol et
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "Geçersiz sürüm etiketi: $RELEASE_TAG"
+            echo "Beklenen biçim: v6.1 veya v6.1.0"
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Bu sürüm etiketi zaten var: $RELEASE_TAG"
+            exit 1
+          fi
+
+          echo "Sürüm etiketi uygun: $RELEASE_TAG"
+
+      - name: Ön kontroller
         shell: bash
         run: |
           set -euo pipefail
@@ -119,7 +148,69 @@ jobs:
             python -c \
             'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=10).read().decode())'
 
-      - name: Rollback on failure
+      - name: Başarılı sürümü etiketle
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "$RELEASE_TAG"             -m "Üretim sürümü $RELEASE_TAG"
+
+          git push origin "$RELEASE_TAG"
+
+      - name: GitHub Release oluştur
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY2'
+          import json
+          import os
+          import urllib.request
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["RELEASE_TAG"]
+          token = os.environ["GH_TOKEN"]
+
+          url = f"https://api.github.com/repos/{repo}/releases"
+
+          payload = {
+              "tag_name": tag,
+              "name": f"Oracle University Analytics Platform {tag}",
+              "body": (
+                  f"Üretim dağıtımı: {tag}\n\n"
+                  f"Commit: {os.environ['GITHUB_SHA']}\n"
+                  f"Ortam: production\n"
+                  f"Deployment: oracle-university-api-v2"
+              ),
+              "draft": False,
+              "prerelease": False
+          }
+
+          req = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode(),
+              method="POST",
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "Content-Type": "application/json",
+              },
+          )
+
+          with urllib.request.urlopen(req) as r:
+              print(r.read().decode())
+          PY2
+
+      - name: Hata olursa geri al
         if: failure()
         shell: bash
         run: |

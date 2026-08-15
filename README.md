@@ -106,3 +106,50 @@ analytics-worker
 Platform K3s üzerinde çalışır durumdadır.
 
 Oracle veritabanından gerçek satış verisi okunmakta, analitik worker tarafından tahmin oluşturulmakta ve sonuçlar dashboard üzerinden raporlanmaktadır.
+
+## CI/CD
+
+Projenin CI/CD süreci GitHub Actions ve DevOps-Lab üzerinde çalışan
+self-hosted runner ile yürütülmektedir.
+
+Üretim dağıtım akışı:
+
+```text
+Geliştirici
+   |
+   v
+Git Push
+   |
+   v
+GitHub
+   |
+   +--> CI Kontrolleri
+   |     |
+   |     +--> Python sözdizimi kontrolü
+   |     +--> Gerekli dosyaların kontrolü
+   |
+   v
+Manuel Üretim Dağıtımı
+   |
+   v
+GitHub production ortamı
+   |
+   v
+Self-hosted GitHub Actions Runner
+   |
+   v
+Podman image build
+   |
+   v
+K3s image import
+   |
+   v
+Kubernetes rollout
+   |
+   v
+Uygulama health check
+   |
+   +--> Başarılı --> Git tag + GitHub Release
+   |
+   +--> Hata --> Kubernetes rollback
+
