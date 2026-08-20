@@ -163,6 +163,14 @@ keycloak_jwks_url = os.getenv(
     f"{keycloak_issuer}/protocol/openid-connect/certs",
 )
 keycloak_client_id = os.getenv("KEYCLOAK_CLIENT_ID", "university-api")
+keycloak_allowed_client_ids = {
+    item.strip()
+    for item in os.getenv(
+        "KEYCLOAK_ALLOWED_CLIENT_IDS",
+        "university-api,university-dashboard",
+    ).split(",")
+    if item.strip()
+}
 jwks_client = PyJWKClient(keycloak_jwks_url, cache_keys=True)
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -208,7 +216,7 @@ def decode_access_token(token: str) -> dict[str, object]:
         issuer=keycloak_issuer,
         options={"verify_aud": False},
     )
-    if claims.get("azp") != keycloak_client_id:
+    if claims.get("azp") not in keycloak_allowed_client_ids:
         raise jwt.InvalidAudienceError("Unexpected authorized party")
     return claims
 
@@ -879,6 +887,79 @@ header h1{
   margin-top:7px;
 }
 
+.auth-header{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:12px;
+  margin-bottom:10px;
+}
+
+.auth-identity{
+  display:flex;
+  flex-direction:column;
+  text-align:right;
+}
+
+.auth-identity strong{font-size:13px}
+
+.auth-identity span{
+  color:var(--muted);
+  font-size:11px;
+  margin-top:2px;
+}
+
+#auth-button{
+  padding:8px 12px;
+  font-size:12px;
+}
+
+body.auth-required .layout{
+  display:none;
+}
+
+.auth-login-screen{
+  display:none;
+  min-height:100vh;
+  align-items:center;
+  justify-content:center;
+  background:#f5f7fa;
+  padding:24px;
+}
+
+body.auth-required .auth-login-screen{
+  display:flex;
+}
+
+.auth-login-card{
+  width:100%;
+  max-width:430px;
+  background:#fff;
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:32px;
+  box-shadow:0 10px 30px rgba(16,24,40,.08);
+  text-align:center;
+}
+
+.auth-login-card h1{
+  margin:0 0 12px;
+  font-size:24px;
+}
+
+.auth-login-card p{
+  color:var(--muted);
+  margin-bottom:24px;
+  line-height:1.5;
+}
+
+#auth-login-error{
+  margin-top:16px;
+  color:var(--danger);
+  font-size:12px;
+}
+
+
 main{
   padding:28px 30px 40px;
   max-width:1500px;
@@ -1459,7 +1540,16 @@ footer{
 </style>
 </head>
 
-<body>
+<body class="auth-required">
+
+<div id="auth-login-screen" class="auth-login-screen">
+  <div class="auth-login-card">
+    <h1>Oracle University Analytics</h1>
+    <p>Dashboard'a erişmek için Keycloak hesabınızla giriş yapın.</p>
+    <button type="button" onclick="loginWithKeycloak()">Keycloak ile Giriş Yap</button>
+    <div id="auth-login-error"></div>
+  </div>
+</div>
 <div class="layout">
 
 <aside>
@@ -1486,6 +1576,14 @@ footer{
   </div>
 
   <div class="header-right">
+    <div class="auth-header">
+      <div class="auth-identity">
+        <strong id="auth-user-name">Oturum kapalı</strong>
+        <span id="auth-user-role">—</span>
+      </div>
+      <button id="auth-button" type="button">Giriş Yap</button>
+    </div>
+
     <div id="platform-status" class="status-badge status-waiting">
       <span class="dot"></span>Kontrol ediliyor
     </div>
@@ -2079,7 +2177,7 @@ async function createForecast(){
   message.textContent='Görev kuyruğa gönderiliyor...';
 
   try{
-    const response=await fetch('/api/v1/tasks',{
+    const response=await authFetch('/api/v1/tasks',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
@@ -2101,7 +2199,7 @@ async function createForecast(){
     for(let i=0;i<30;i++){
       await new Promise(resolve=>setTimeout(resolve,2000));
 
-      const r=await fetch('/api/v1/tasks/'+task.message_id);
+      const r=await authFetch('/api/v1/tasks/'+task.message_id);
       const data=await r.json();
 
       if(data.status==='completed'){
@@ -2299,7 +2397,7 @@ async function showReport(messageId){
   root.innerHTML='<div class="empty">Rapor yükleniyor...</div>';
 
   try{
-    const response=await fetch('/api/v1/reports/'+messageId);
+    const response=await authFetch('/api/v1/reports/'+messageId);
     if(!response.ok)throw new Error('Rapor alınamadı');
 
     const report=await response.json();
@@ -2335,14 +2433,383 @@ async function showReport(messageId){
   }
 }
 
+
+const KEYCLOAK_BASE = "http://192.168.56.102:30081";
+const KEYCLOAK_REALM = "university";
+const KEYCLOAK_DASHBOARD_CLIENT = "university-dashboard";
+const DASHBOARD_REDIRECT_URI = window.location.origin + "/dashboard";
+
+function base64UrlEncode(buffer){
+  return btoa(String.fromCharCode(...new Uint8Array(buffer)))
+    .replace(/\+/g,"-")
+    .replace(/\//g,"_")
+    .replace(/=+$/,"");
+}
+
+function randomPkceString(length=64){
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+
+  const values = new Uint8Array(length);
+  crypto.getRandomValues(values);
+
+  return Array.from(
+    values,
+    value => chars[value % chars.length]
+  ).join("");
+}
+
+async function loginWithKeycloak(){
+  const verifier = randomPkceString(72);
+
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(verifier)
+  );
+
+  const challenge = base64UrlEncode(digest);
+  const state = randomPkceString(32);
+
+  sessionStorage.setItem("university-pkce-verifier", verifier);
+  sessionStorage.setItem("university-oauth-state", state);
+
+  const params = new URLSearchParams({
+    client_id: KEYCLOAK_DASHBOARD_CLIENT,
+    redirect_uri: DASHBOARD_REDIRECT_URI,
+    response_type: "code",
+    scope: "openid profile email",
+    state: state,
+    code_challenge: challenge,
+    code_challenge_method: "S256"
+  });
+
+  window.location.href =
+    KEYCLOAK_BASE +
+    "/realms/" +
+    KEYCLOAK_REALM +
+    "/protocol/openid-connect/auth?" +
+    params.toString();
+}
+
+function clearDashboardAuth(){
+  sessionStorage.removeItem("university-access-token");
+  sessionStorage.removeItem("university-refresh-token");
+  sessionStorage.removeItem("university-token-expiry");
+}
+
+async function exchangeAuthorizationCode(code){
+  const verifier =
+    sessionStorage.getItem("university-pkce-verifier");
+
+  if(!verifier){
+    throw new Error("PKCE doğrulama bilgisi bulunamadı.");
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: KEYCLOAK_DASHBOARD_CLIENT,
+    code: code,
+    redirect_uri: DASHBOARD_REDIRECT_URI,
+    code_verifier: verifier
+  });
+
+  const response = await window.fetch(
+    KEYCLOAK_BASE +
+      "/realms/" +
+      KEYCLOAK_REALM +
+      "/protocol/openid-connect/token",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: body
+    }
+  );
+
+  if(!response.ok){
+    throw new Error("Keycloak token oluşturamadı.");
+  }
+
+  const token = await response.json();
+
+  sessionStorage.setItem(
+    "university-access-token",
+    token.access_token
+  );
+
+  if(token.refresh_token){
+    sessionStorage.setItem(
+      "university-refresh-token",
+      token.refresh_token
+    );
+  }
+
+  sessionStorage.setItem(
+    "university-token-expiry",
+    String(Date.now() + Number(token.expires_in || 300) * 1000)
+  );
+
+  sessionStorage.removeItem("university-pkce-verifier");
+  sessionStorage.removeItem("university-oauth-state");
+}
+
+async function refreshDashboardToken(){
+  const refreshToken =
+    sessionStorage.getItem("university-refresh-token");
+
+  if(!refreshToken){
+    return null;
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: KEYCLOAK_DASHBOARD_CLIENT,
+    refresh_token: refreshToken
+  });
+
+  const response = await window.fetch(
+    KEYCLOAK_BASE +
+      "/realms/" +
+      KEYCLOAK_REALM +
+      "/protocol/openid-connect/token",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: body
+    }
+  );
+
+  if(!response.ok){
+    clearDashboardAuth();
+    return null;
+  }
+
+  const token = await response.json();
+
+  sessionStorage.setItem(
+    "university-access-token",
+    token.access_token
+  );
+
+  if(token.refresh_token){
+    sessionStorage.setItem(
+      "university-refresh-token",
+      token.refresh_token
+    );
+  }
+
+  sessionStorage.setItem(
+    "university-token-expiry",
+    String(Date.now() + Number(token.expires_in || 300) * 1000)
+  );
+
+  return token.access_token;
+}
+
+async function ensureDashboardToken(){
+  const token =
+    sessionStorage.getItem("university-access-token");
+
+  if(!token){
+    return null;
+  }
+
+  const expiry =
+    Number(sessionStorage.getItem("university-token-expiry") || 0);
+
+  if(expiry && Date.now() >= expiry - 30000){
+    return await refreshDashboardToken();
+  }
+
+  return token;
+}
+
+async function authFetch(url, options={}){
+  const token = await ensureDashboardToken();
+
+  if(!token){
+    throw new Error("AUTHENTICATION_REQUIRED");
+  }
+
+  const headers = new Headers(options.headers || {});
+
+  headers.set("Authorization", "Bearer " + token);
+
+  const response =
+    await window.fetch(
+      url,
+      {
+        ...options,
+        headers: headers
+      }
+    );
+
+  if(response.status === 401){
+    clearDashboardAuth();
+  }
+
+  return response;
+}
+
+function roleLabel(roles){
+  if(roles.includes("university-admin")){
+    return "Yönetici";
+  }
+
+  if(roles.includes("analyst")){
+    return "Analist";
+  }
+
+  if(roles.includes("viewer")){
+    return "Görüntüleyici";
+  }
+
+  return "Yetkisiz";
+}
+
+function applyDashboardRolePermissions(roles){
+  const canForecast =
+    roles.includes("analyst") ||
+    roles.includes("university-admin");
+
+  document.querySelectorAll("button").forEach(button => {
+    const value =
+      (button.textContent || "").toLocaleLowerCase("tr-TR");
+
+    if(
+      value.includes("tahmin") ||
+      value.includes("forecast")
+    ){
+      button.disabled = !canForecast;
+
+      if(!canForecast){
+        button.title =
+          "Bu işlem analyst veya administrator rolü gerektirir.";
+      }
+    }
+  });
+}
+
+function renderAuthenticatedUser(user){
+  const roles =
+    Array.isArray(user.roles) ? user.roles : [];
+
+  document.getElementById("auth-user-name").textContent =
+    user.username || "Kullanıcı";
+
+  document.getElementById("auth-user-role").textContent =
+    roleLabel(roles);
+
+  const button =
+    document.getElementById("auth-button");
+
+  button.textContent = "Çıkış Yap";
+  button.onclick = logoutFromKeycloak;
+
+  applyDashboardRolePermissions(roles);
+
+  document.body.classList.remove("auth-required");
+}
+
+function renderLoggedOut(message=""){
+  document.body.classList.add("auth-required");
+
+  const error =
+    document.getElementById("auth-login-error");
+
+  if(error){
+    error.textContent = message;
+  }
+}
+
+function logoutFromKeycloak(){
+  clearDashboardAuth();
+
+  const params =
+    new URLSearchParams({
+      client_id: KEYCLOAK_DASHBOARD_CLIENT,
+      post_logout_redirect_uri: DASHBOARD_REDIRECT_URI
+    });
+
+  window.location.href =
+    KEYCLOAK_BASE +
+    "/realms/" +
+    KEYCLOAK_REALM +
+    "/protocol/openid-connect/logout?" +
+    params.toString();
+}
+
+async function initializeDashboardAuth(){
+  try{
+    const params =
+      new URLSearchParams(window.location.search);
+
+    const code = params.get("code");
+    const state = params.get("state");
+
+    if(code){
+      const expectedState =
+        sessionStorage.getItem("university-oauth-state");
+
+      if(!state || state !== expectedState){
+        throw new Error("OAuth state doğrulaması başarısız.");
+      }
+
+      await exchangeAuthorizationCode(code);
+
+      history.replaceState(
+        {},
+        document.title,
+        "/dashboard"
+      );
+    }
+
+    const token =
+      await ensureDashboardToken();
+
+    if(!token){
+      renderLoggedOut();
+      return;
+    }
+
+    const response =
+      await authFetch("/api/v1/me");
+
+    if(!response.ok){
+      throw new Error("Kullanıcı bilgisi alınamadı.");
+    }
+
+    const user = await response.json();
+
+    renderAuthenticatedUser(user);
+
+    await loadDashboard();
+
+    setInterval(loadDashboard, 15000);
+
+  }catch(error){
+    console.error("Dashboard authentication:", error);
+
+    clearDashboardAuth();
+
+    renderLoggedOut(
+      error.message || "Oturum açılamadı."
+    );
+  }
+}
+
+
 async function loadDashboard(){
   try{
     const [dashboardResponse,salesResponse,categoryResponse,reportsResponse]=
       await Promise.all([
-        fetch('/api/v1/dashboard'),
-        fetch('/api/v1/oracle/monthly-sales'),
-        fetch('/api/v1/oracle/category-sales'),
-        fetch('/api/v1/reports')
+        authFetch('/api/v1/dashboard'),
+        authFetch('/api/v1/oracle/monthly-sales'),
+        authFetch('/api/v1/oracle/category-sales'),
+        authFetch('/api/v1/reports')
       ]);
 
     if(!dashboardResponse.ok)throw new Error('Dashboard API yanıt vermedi');
@@ -2396,8 +2863,7 @@ async function loadDashboard(){
   }
 }
 
-loadDashboard();
-setInterval(loadDashboard,15000);
+initializeDashboardAuth();
 
 
 // ============================================================
@@ -2544,7 +3010,7 @@ async function loadInfrastructureV5() {
 
     try {
 
-        const response = await fetch("/api/v1/dashboard");
+        const response = await authFetch("/api/v1/dashboard");
         const data = await response.json();
 
         const map = {
@@ -2604,7 +3070,7 @@ async function loadModelPerformanceV5() {
 
     try {
 
-        const response = await fetch("/api/v1/reports");
+        const response = await authFetch("/api/v1/reports");
 
         if (!response.ok) {
             throw new Error("Reports request failed");
@@ -2632,7 +3098,7 @@ async function refreshInfrastructureV5() {
 
     try {
 
-        const response = await fetch("/api/v1/dashboard");
+        const response = await authFetch("/api/v1/dashboard");
 
         if (!response.ok) {
             throw new Error("Dashboard request failed");
@@ -2793,7 +3259,7 @@ async function loadOverviewMetricsV5() {
 
     try {
 
-        const response = await fetch("/api/v1/reports");
+        const response = await authFetch("/api/v1/reports");
 
         if (!response.ok) {
             throw new Error("reports fetch failed");
@@ -3220,7 +3686,7 @@ async function loadReportsToolsV5() {
     try {
 
         const response =
-            await fetch("/api/v1/reports");
+            await authFetch("/api/v1/reports");
 
         if (!response.ok) {
             throw new Error("reports fetch failed");
@@ -3429,7 +3895,7 @@ async function loadModelComparisonV6() {
 
     try {
 
-        const response = await fetch("/api/v1/reports");
+        const response = await authFetch("/api/v1/reports");
 
         if (!response.ok) {
             return;
