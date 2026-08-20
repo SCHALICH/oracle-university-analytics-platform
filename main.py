@@ -2460,27 +2460,19 @@ function randomPkceString(length=64){
 }
 
 async function loginWithKeycloak(){
-  const verifier = randomPkceString(72);
-
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(verifier)
-  );
-
-  const challenge = base64UrlEncode(digest);
   const state = randomPkceString(32);
 
-  sessionStorage.setItem("university-pkce-verifier", verifier);
-  sessionStorage.setItem("university-oauth-state", state);
+  sessionStorage.setItem(
+    "university-oauth-state",
+    state
+  );
 
   const params = new URLSearchParams({
     client_id: KEYCLOAK_DASHBOARD_CLIENT,
     redirect_uri: DASHBOARD_REDIRECT_URI,
     response_type: "code",
     scope: "openid profile email",
-    state: state,
-    code_challenge: challenge,
-    code_challenge_method: "S256"
+    state: state
   });
 
   window.location.href =
@@ -2498,19 +2490,11 @@ function clearDashboardAuth(){
 }
 
 async function exchangeAuthorizationCode(code){
-  const verifier =
-    sessionStorage.getItem("university-pkce-verifier");
-
-  if(!verifier){
-    throw new Error("PKCE doğrulama bilgisi bulunamadı.");
-  }
-
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     client_id: KEYCLOAK_DASHBOARD_CLIENT,
     code: code,
-    redirect_uri: DASHBOARD_REDIRECT_URI,
-    code_verifier: verifier
+    redirect_uri: DASHBOARD_REDIRECT_URI
   });
 
   const response = await window.fetch(
@@ -2550,7 +2534,6 @@ async function exchangeAuthorizationCode(code){
     String(Date.now() + Number(token.expires_in || 300) * 1000)
   );
 
-  sessionStorage.removeItem("university-pkce-verifier");
   sessionStorage.removeItem("university-oauth-state");
 }
 
